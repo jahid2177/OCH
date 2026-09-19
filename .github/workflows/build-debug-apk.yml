@@ -113,6 +113,32 @@ jobs:
           ns error-reporting disable
           ns --version
 
+      - name: Verify Android runtime selection
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          node - <<'NODE'
+          const pkg = require('./package.json');
+          const dev = pkg.devDependencies || {};
+
+          if (dev['@nativescript/android-quickjs-ng']) {
+            throw new Error(
+              'Experimental @nativescript/android-quickjs-ng is still enabled. ' +
+              'Replace it with @akylas/nativescript-android-runtime.'
+            );
+          }
+
+          if (dev['@akylas/nativescript-android-runtime'] !== '9.0.4') {
+            throw new Error(
+              'Expected @akylas/nativescript-android-runtime 9.0.4, got: ' +
+              dev['@akylas/nativescript-android-runtime']
+            );
+          }
+
+          console.log('Android runtime OK:', dev['@akylas/nativescript-android-runtime']);
+          NODE
+
       - name: Install project dependencies
         shell: bash
         run: |
@@ -297,37 +323,62 @@ jobs:
           set -euxo pipefail
           rm -rf "$APP_BUILD_PATH/android" "$APP_BUILD_PATH/tempPlugin"
 
-      - name: Build Document Scanner Debug APK
+      - name: Build safe sideload Debug APK
         shell: bash
+        env:
+          NS_LOGGING: '1'
         run: |
           set -euxo pipefail
 
+          # This is a sideload/debug build, not a Play Store build.
+          # Explicitly disable Play Store startup paths (billing/Sentry defaults).
           ns build android \
+            --clean \
             --no-hmr \
             --env.devlog \
             --env.production=0 \
-            --gradleArgs="-PabiFilters=arm64-v8a,armeabi-v7a"
+            --env.playStoreBuild=0 \
+            --env.sentry=0 \
+            --env.noconsole=0 \
+            --env.sourceMap=1 \
+            --gradleArgs=-PsplitEnabled \
+            --gradleArgs=-PabiFilters=arm64-v8a,armeabi-v7a \
+            --gradleArgs=-PuniversalApk
 
-      - name: Find and collect Debug APK
+      - name: Find and collect correct Debug APK
         id: apk
         shell: bash
         run: |
           set -euxo pipefail
 
-          APK_PATH="$(find "$APP_BUILD_PATH" -type f -name '*.apk' \
+          echo "Generated APKs:"
+          find "$APP_BUILD_PATH" -type f -name '*.apk' -print | sort || true
+
+          # Prefer the universal APK so Android itself selects the correct
+          # native ABI. Fall back to arm64-v8a only if universal is unavailable.
+          APK_PATH="$(find "$APP_BUILD_PATH" -type f \
+            -name '*universal*.apk' \
             ! -name '*release*' \
             ! -name '*unsigned*' \
             | head -n 1)"
 
           if [ -z "$APK_PATH" ]; then
-            echo "ERROR: Debug APK was not found."
-            find "$APP_BUILD_PATH" -type f -name '*.apk' -print || true
+            APK_PATH="$(find "$APP_BUILD_PATH" -type f \
+              \( -name '*arm64-v8a*.apk' -o -name '*arm64*.apk' \) \
+              ! -name '*release*' \
+              ! -name '*unsigned*' \
+              | head -n 1)"
+          fi
+
+          if [ -z "$APK_PATH" ]; then
+            echo "ERROR: Universal/arm64 Debug APK was not found."
             exit 1
           fi
 
           mkdir -p dist
           cp "$APK_PATH" dist/OSS-DocumentScanner-debug.apk
 
+          echo "Selected APK: $APK_PATH"
           echo "apk_path=dist/OSS-DocumentScanner-debug.apk" >> "$GITHUB_OUTPUT"
           ls -lh dist/OSS-DocumentScanner-debug.apk
 
