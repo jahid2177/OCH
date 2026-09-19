@@ -31,6 +31,7 @@ jobs:
       YARN_ENABLE_IMMUTABLE_INSTALLS: 'false'
       NS_SENTRY: ''
       PLAY_STORE_BUILD: ''
+      OPENCV_VERSION: '4.12.0'
 
     steps:
       - name: Checkout repository
@@ -87,11 +88,6 @@ jobs:
           echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
           echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
 
-          sdkmanager --list_installed
-
-      # Akylas/NativeScript environment detection still expects the old
-      # $ANDROID_HOME/tools SDK layout. Modern Android SDKs use
-      # cmdline-tools/latest and emulator/. Build a compatibility bridge.
       - name: Create NativeScript Android SDK compatibility bridge
         shell: bash
         run: |
@@ -122,17 +118,6 @@ jobs:
           echo "$ANDROID_HOME/tools" >> "$GITHUB_PATH"
           echo "$ANDROID_HOME/tools/bin" >> "$GITHUB_PATH"
 
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_HOME"
-
-          ls -la "$ANDROID_HOME/tools"
-          ls -la "$ANDROID_HOME/tools/bin"
-
-          command -v adb
-          command -v sdkmanager
-          command -v avdmanager
-          command -v emulator
-
       - name: Restore required source submodules
         shell: bash
         run: |
@@ -150,12 +135,6 @@ jobs:
 
           test -f tools/package.json
           test -f zxingcpp/CMakeLists.txt
-
-          echo "Restored tools revision:"
-          git -C tools rev-parse --short HEAD
-
-          echo "Restored zxingcpp revision:"
-          git -C zxingcpp rev-parse --short HEAD
 
       - name: Enable Corepack and Yarn
         shell: bash
@@ -184,36 +163,100 @@ jobs:
         run: |
           yarn install --silent
 
-      - name: Download OpenCV and Tesseract build resources
+      - name: Download project Android native resources
         shell: bash
         run: |
+          set -euxo pipefail
+
+          rm -f android.zip
           chmod +x scripts/ci.prepare.sh
-          ./scripts/ci.prepare.sh --platform android --flavor documentscanner
+          bash scripts/ci.prepare.sh \
+            --platform android \
+            --flavor documentscanner
 
-      - name: Verify native resources
+      # The project requires OpenCV headers and static libraries under:
+      #   opencv/android/include
+      #   opencv/android/staticlibs/<ABI>
+      #   opencv/android/3rdparty/libs/<ABI>
+      #
+      # The source repository does not store these large Android binaries.
+      # Install the exact OpenCV version documented by OSS-DocumentScanner.
+      - name: Install OpenCV 4.12.0 Android SDK
         shell: bash
         run: |
-          test -d opencv/android || {
-            echo "ERROR: opencv/android is missing"
-            exit 1
-          }
+          set -euxo pipefail
 
-          test -d tesseract/android || {
-            echo "ERROR: tesseract/android is missing"
-            exit 1
-          }
+          WORK_DIR="$RUNNER_TEMP/opencv-sdk"
+          ZIP_PATH="$RUNNER_TEMP/opencv-${OPENCV_VERSION}-android-sdk.zip"
 
-          test -d tools || {
-            echo "ERROR: tools is missing"
-            exit 1
-          }
+          rm -rf "$WORK_DIR"
+          mkdir -p "$WORK_DIR"
 
-          test -d zxingcpp || {
-            echo "ERROR: zxingcpp is missing"
-            exit 1
-          }
+          wget \
+            --tries=5 \
+            --retry-connrefused \
+            --waitretry=2 \
+            -O "$ZIP_PATH" \
+            "https://github.com/opencv/opencv/releases/download/${OPENCV_VERSION}/opencv-${OPENCV_VERSION}-android-sdk.zip"
 
-          echo "Required native resources are ready."
+          unzip -q "$ZIP_PATH" -d "$WORK_DIR"
+
+          SDK_ROOT="$(find "$WORK_DIR" -maxdepth 2 -type d -name 'OpenCV-android-sdk' | head -n 1)"
+
+          if [ -z "$SDK_ROOT" ]; then
+            echo "ERROR: OpenCV-android-sdk directory was not found after extraction."
+            find "$WORK_DIR" -maxdepth 3 -type d -print
+            exit 1
+          fi
+
+          rm -rf opencv/android
+          mkdir -p opencv/android/include
+
+          cp -a \
+            "$SDK_ROOT/sdk/native/jni/include/." \
+            opencv/android/include/
+
+          cp -a \
+            "$SDK_ROOT/sdk/native/staticlibs" \
+            opencv/android/staticlibs
+
+          cp -a \
+            "$SDK_ROOT/sdk/native/3rdparty" \
+            opencv/android/3rdparty
+
+          echo "OpenCV Android SDK installed:"
+          find opencv/android -maxdepth 3 -type f | head -n 80
+
+      - name: Verify native C++ dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # OpenCV headers
+          test -f opencv/android/include/opencv2/opencv.hpp
+
+          # OpenCV static libs used by CMake
+          test -f opencv/android/staticlibs/arm64-v8a/libopencv_core.a
+          test -f opencv/android/staticlibs/arm64-v8a/libopencv_imgproc.a
+          test -f opencv/android/staticlibs/arm64-v8a/libopencv_photo.a
+
+          test -f opencv/android/staticlibs/armeabi-v7a/libopencv_core.a
+          test -f opencv/android/staticlibs/armeabi-v7a/libopencv_imgproc.a
+          test -f opencv/android/staticlibs/armeabi-v7a/libopencv_photo.a
+
+          # Tesseract resources from the project's dev_resources package
+          test -d tesseract/android
+          test -d tesseract/android/include
+          test -d tesseract/android/staticlibs
+
+          test -f tesseract/android/staticlibs/arm64-v8a/libtesseract.a
+          test -f tesseract/android/staticlibs/armeabi-v7a/libtesseract.a
+
+          # Source dependencies
+          test -f tools/package.json
+          test -f zxingcpp/CMakeLists.txt
+
+          echo "All required native dependencies are present."
 
       - name: Build Document Scanner Debug APK
         shell: bash
