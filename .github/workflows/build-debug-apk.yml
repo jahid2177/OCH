@@ -258,6 +258,62 @@ jobs:
 
           echo "All required native dependencies are present."
 
+      # NativeScript copies plugin-nativeprocessor to build/.../tempPlugin before
+      # compiling it. The repository uses relative symlinks inside cpp/:
+      #   opencv   -> ../../../../opencv/android
+      #   tesseract-> ../../../../tesseract/android
+      #   src      -> ../../../../cpp/src
+      #   zxingcpp -> ../../../../zxingcpp
+      #
+      # Those relative links become invalid after the plugin is copied into
+      # tempPlugin. Replace them with real directories before NativeScript
+      # performs the copy so all C++ headers/sources/static libraries survive.
+      - name: Materialize native plugin dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          CPP_DIR="plugin-nativeprocessor/platforms/android/cpp"
+
+          # Remove repository symlinks/placeholders.
+          rm -rf \
+            "$CPP_DIR/opencv" \
+            "$CPP_DIR/tesseract" \
+            "$CPP_DIR/src" \
+            "$CPP_DIR/zxingcpp"
+
+          mkdir -p \
+            "$CPP_DIR/opencv" \
+            "$CPP_DIR/tesseract" \
+            "$CPP_DIR/src" \
+            "$CPP_DIR/zxingcpp"
+
+          # Copy the actual contents instead of symlinks.
+          cp -a opencv/android/. "$CPP_DIR/opencv/"
+          cp -a tesseract/android/. "$CPP_DIR/tesseract/"
+          cp -a cpp/src/. "$CPP_DIR/src/"
+          cp -a zxingcpp/. "$CPP_DIR/zxingcpp/"
+
+          # Verify exactly what CMake will see inside the plugin.
+          test -f "$CPP_DIR/opencv/include/opencv2/opencv.hpp"
+          test -f "$CPP_DIR/opencv/staticlibs/arm64-v8a/libopencv_core.a"
+          test -f "$CPP_DIR/opencv/staticlibs/armeabi-v7a/libopencv_core.a"
+
+          test -d "$CPP_DIR/tesseract/include"
+          test -f "$CPP_DIR/tesseract/staticlibs/arm64-v8a/libtesseract.a"
+          test -f "$CPP_DIR/tesseract/staticlibs/armeabi-v7a/libtesseract.a"
+
+          test -f "$CPP_DIR/src/DocumentDetector.cpp"
+          test -f "$CPP_DIR/src/include/DocumentDetector.h"
+          test -f "$CPP_DIR/zxingcpp/core/CMakeLists.txt"
+
+          echo "Native plugin dependencies materialized successfully."
+          du -sh \
+            "$CPP_DIR/opencv" \
+            "$CPP_DIR/tesseract" \
+            "$CPP_DIR/src" \
+            "$CPP_DIR/zxingcpp"
+
       - name: Build Document Scanner Debug APK
         shell: bash
         run: |
