@@ -59,7 +59,9 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+
           yes | sdkmanager --licenses >/dev/null || true
+
           sdkmanager \
             "cmdline-tools;latest" \
             "platform-tools" \
@@ -69,11 +71,37 @@ jobs:
             "ndk;27.3.13750724" \
             "cmake;3.22.1"
 
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+
       - name: Enable Corepack and Yarn
         shell: bash
         run: |
           corepack enable
           yarn --version
+
+      - name: Restore missing source dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          if [ ! -f "tools/package.json" ]; then
+            rm -rf tools
+            git clone --filter=blob:none https://github.com/Akylas/app-tools.git tools
+            git -C tools checkout 01fb954
+            git -C tools submodule update --init --recursive
+          fi
+
+          if [ ! -f "zxingcpp/core/CMakeLists.txt" ]; then
+            rm -rf zxingcpp
+            git clone --filter=blob:none https://github.com/Akylas/zxing-cpp.git zxingcpp
+            git -C zxingcpp checkout cbf6afd
+            git -C zxingcpp submodule update --init --recursive
+          fi
+
+          test -f tools/package.json
+          test -f zxingcpp/core/CMakeLists.txt
 
       - name: Install NativeScript CLI
         shell: bash
@@ -94,6 +122,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+
           rm -f android.zip
           chmod +x scripts/ci.prepare.sh
           bash scripts/ci.prepare.sh --platform android --flavor documentscanner
@@ -102,6 +131,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+
           WORK_DIR="$RUNNER_TEMP/opencv-sdk"
           ZIP_PATH="$RUNNER_TEMP/opencv-${OPENCV_VERSION}-android-sdk.zip"
 
@@ -118,9 +148,9 @@ jobs:
           unzip -q "$ZIP_PATH" -d "$WORK_DIR"
 
           SDK_ROOT="$(find "$WORK_DIR" -maxdepth 2 -type d -name 'OpenCV-android-sdk' | head -n 1)"
+
           if [ -z "$SDK_ROOT" ]; then
-            echo "ERROR: OpenCV-android-sdk directory was not found after extraction."
-            find "$WORK_DIR" -maxdepth 3 -type d -print
+            echo "ERROR: OpenCV-android-sdk directory was not found."
             exit 1
           fi
 
@@ -130,6 +160,10 @@ jobs:
           cp -a "$SDK_ROOT/sdk/native/jni/include/." opencv/android/include/
           cp -a "$SDK_ROOT/sdk/native/staticlibs" opencv/android/staticlibs
           cp -a "$SDK_ROOT/sdk/native/3rdparty" opencv/android/3rdparty
+
+          test -f opencv/android/include/opencv2/opencv.hpp
+          test -f opencv/android/staticlibs/arm64-v8a/libopencv_core.a
+          test -f opencv/android/staticlibs/armeabi-v7a/libopencv_core.a
 
       - name: Materialize native plugin dependencies
         shell: bash
@@ -144,19 +178,155 @@ jobs:
             "$CPP_DIR/src" \
             "$CPP_DIR/zxingcpp"
 
-          mkdir -p "$CPP_DIR/opencv" "$CPP_DIR/tesseract" "$CPP_DIR/src" "$CPP_DIR/zxingcpp"
+          mkdir -p \
+            "$CPP_DIR/opencv" \
+            "$CPP_DIR/tesseract" \
+            "$CPP_DIR/src" \
+            "$CPP_DIR/zxingcpp"
 
           cp -a opencv/android/. "$CPP_DIR/opencv/"
           cp -a tesseract/android/. "$CPP_DIR/tesseract/"
           cp -a cpp/src/. "$CPP_DIR/src/"
           cp -a zxingcpp/. "$CPP_DIR/zxingcpp/"
 
+          test -f "$CPP_DIR/opencv/include/opencv2/opencv.hpp"
+          test -f "$CPP_DIR/tesseract/staticlibs/arm64-v8a/libtesseract.a"
+          test -f "$CPP_DIR/tesseract/staticlibs/armeabi-v7a/libtesseract.a"
+          test -f "$CPP_DIR/src/DocumentDetector.cpp"
+
+      - name: Verify ABI configuration
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          INCLUDE_GRADLE="plugin-nativeprocessor/platforms/android/include.gradle"
+
+          grep -F "abiFilters 'armeabi-v7a', 'arm64-v8a'" "$INCLUDE_GRADLE"
+          grep -F "ndk {" "$INCLUDE_GRADLE"
+
+          if grep -Eq "abiFilters.*x86" "$INCLUDE_GRADLE"; then
+            echo "ERROR: x86 ABI is still enabled in plugin-nativeprocessor."
+            exit 1
+          fi
+
+          echo "Only armeabi-v7a and arm64-v8a are enabled."
+
+      - name: Patch OpenCV ARM static linker dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          CMAKE_FILE="plugin-nativeprocessor/platforms/android/cpp/CMakeLists.txt"
+
+          test -f "$CMAKE_FILE"
+
+          # Avoid appending the patch twice if it is already committed.
+          if ! grep -q "OPENSCAN_OPENCV_STATIC_FIX" "$CMAKE_FILE"; then
+            cat >> "$CMAKE_FILE" <<'CMAKE_EOF'
+
+          # OPENSCAN_OPENCV_STATIC_FIX
+          # Required by the stock OpenCV 4.12 Android static archives.
+          set(OPENCV_EXTRA_STATIC_LIBS "")
+
+          foreach(OPENCV_EXTRA_LIB
+                  ittnotify
+                  cpufeatures
+                  tegra_hal
+                  tbb)
+              set(OPENCV_EXTRA_LIB_PATH
+                  "${CMAKE_CURRENT_SOURCE_DIR}/opencv/3rdparty/libs/${ANDROID_ABI}/lib${OPENCV_EXTRA_LIB}.a")
+
+              if(EXISTS "${OPENCV_EXTRA_LIB_PATH}")
+                  message(STATUS "Linking OpenCV dependency: ${OPENCV_EXTRA_LIB_PATH}")
+                  list(APPEND OPENCV_EXTRA_STATIC_LIBS "${OPENCV_EXTRA_LIB_PATH}")
+              endif()
+          endforeach()
+
+          target_link_libraries(${TARGET}
+              ${OPENCV_EXTRA_STATIC_LIBS}
+              dl
+              atomic
+              m
+          )
+          CMAKE_EOF
+          fi
+
+      - name: Clean previous generated Android build
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf \
+            "$APP_BUILD_PATH/android" \
+            "$APP_BUILD_PATH/tempPlugin"
+
       - name: Build Document Scanner Debug APK
         shell: bash
         run: |
           set -euxo pipefail
+
           ns build android \
             --no-hmr \
             --env.devlog \
             --env.production=0 \
-            --gradleArgs=-PabiFilters=arm64-v8a,armeabi-v7a
+            --gradleArgs="-PabiFilters=arm64-v8a,armeabi-v7a"
+
+      - name: Verify no x86 native build was produced
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          if find "$APP_BUILD_PATH" -type d \( -name x86 -o -name x86_64 \) -print | grep -q .; then
+            echo "ERROR: x86/x86_64 native build directories were generated."
+            find "$APP_BUILD_PATH" -type d \( -name x86 -o -name x86_64 \) -print
+            exit 1
+          fi
+
+          echo "ABI verification passed."
+
+      - name: Find and collect Debug APK
+        id: apk
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          APK_PATH="$(find "$APP_BUILD_PATH" -type f -name '*.apk' \
+            ! -name '*release*' \
+            ! -name '*unsigned*' \
+            | head -n 1)"
+
+          if [ -z "$APK_PATH" ]; then
+            echo "ERROR: Debug APK was not found."
+            find "$APP_BUILD_PATH" -type f -name '*.apk' -print || true
+            exit 1
+          fi
+
+          mkdir -p dist
+          cp "$APK_PATH" dist/OSS-DocumentScanner-debug.apk
+
+          echo "apk_path=dist/OSS-DocumentScanner-debug.apk" >> "$GITHUB_OUTPUT"
+          ls -lh dist/OSS-DocumentScanner-debug.apk
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: OSS-DocumentScanner-debug
+          path: ${{ steps.apk.outputs.apk_path }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish latest Debug APK to GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          gh release delete debug-latest --cleanup-tag --yes 2>/dev/null || true
+
+          gh release create debug-latest \
+            "${{ steps.apk.outputs.apk_path }}#OSS-DocumentScanner-debug.apk" \
+            --target "${{ github.sha }}" \
+            --title "OSS Document Scanner - Latest Debug APK" \
+            --notes "Automatic debug APK from commit ${{ github.sha }}. No release APK or AAB is generated." \
+            --prerelease
