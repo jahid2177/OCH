@@ -314,6 +314,67 @@ jobs:
             "$CPP_DIR/src" \
             "$CPP_DIR/zxingcpp"
 
+      # The official OpenCV Android static SDK keeps several dependencies
+      # as separate archives. libopencv_core.a references Intel ITT tracing
+      # and Carotene/Tegra HAL symbols, so those archives must be linked too.
+      # The original project CMake only lists OpenCV core/imgproc/photo and
+      # KleidiCV, which is not sufficient for the stock OpenCV 4.12.0 SDK.
+      - name: Patch OpenCV static linker dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          CMAKE_FILE="plugin-nativeprocessor/platforms/android/cpp/CMakeLists.txt"
+
+          test -f "$CMAKE_FILE"
+
+          cat >> "$CMAKE_FILE" <<'CMAKE_EOF'
+
+          # ---- GitHub CI compatibility: OpenCV 4.12.0 static dependencies ----
+          # OpenCV's Android static package ships some dependencies separately.
+          # Add them only when they exist for the current ABI.
+          set(OPENCV_EXTRA_STATIC_LIBS "")
+
+          foreach(OPENCV_EXTRA_LIB
+                  ittnotify
+                  cpufeatures
+                  tegra_hal
+                  tbb)
+              set(OPENCV_EXTRA_LIB_PATH
+                  "${CMAKE_CURRENT_SOURCE_DIR}/opencv/3rdparty/libs/${ANDROID_ABI}/lib${OPENCV_EXTRA_LIB}.a")
+
+              if(EXISTS "${OPENCV_EXTRA_LIB_PATH}")
+                  message(STATUS "Linking OpenCV dependency: ${OPENCV_EXTRA_LIB_PATH}")
+                  list(APPEND OPENCV_EXTRA_STATIC_LIBS "${OPENCV_EXTRA_LIB_PATH}")
+              endif()
+          endforeach()
+
+          # Keep the dependency archives after libopencv_core.a in the final
+          # link command. dl/m/atomic satisfy Android-side low-level symbols.
+          target_link_libraries(${TARGET}
+              ${OPENCV_EXTRA_STATIC_LIBS}
+              dl
+              atomic
+              m
+          )
+          # ---- End GitHub CI compatibility patch ----
+          CMAKE_EOF
+
+          echo "Available OpenCV third-party libraries (arm64-v8a):"
+          find \
+            "plugin-nativeprocessor/platforms/android/cpp/opencv/3rdparty/libs/arm64-v8a" \
+            -maxdepth 1 -type f -name '*.a' -printf '%f\n' \
+            | sort || true
+
+          echo "Available OpenCV third-party libraries (armeabi-v7a):"
+          find \
+            "plugin-nativeprocessor/platforms/android/cpp/opencv/3rdparty/libs/armeabi-v7a" \
+            -maxdepth 1 -type f -name '*.a' -printf '%f\n' \
+            | sort || true
+
+          echo "Patched CMake tail:"
+          tail -n 55 "$CMAKE_FILE"
+
       - name: Build Document Scanner Debug APK
         shell: bash
         run: |
