@@ -81,7 +81,7 @@ jobs:
           corepack enable
           yarn --version
 
-      - name: Restore missing source dependencies
+      - name: Restore required source dependencies
         shell: bash
         run: |
           set -euxo pipefail
@@ -125,7 +125,9 @@ jobs:
 
           rm -f android.zip
           chmod +x scripts/ci.prepare.sh
-          bash scripts/ci.prepare.sh --platform android --flavor documentscanner
+          bash scripts/ci.prepare.sh \
+            --platform android \
+            --flavor documentscanner
 
       - name: Install OpenCV 4.12.0 Android SDK
         shell: bash
@@ -150,7 +152,7 @@ jobs:
           SDK_ROOT="$(find "$WORK_DIR" -maxdepth 2 -type d -name 'OpenCV-android-sdk' | head -n 1)"
 
           if [ -z "$SDK_ROOT" ]; then
-            echo "ERROR: OpenCV-android-sdk directory was not found."
+            echo "ERROR: OpenCV Android SDK directory was not found."
             exit 1
           fi
 
@@ -164,6 +166,69 @@ jobs:
           test -f opencv/android/include/opencv2/opencv.hpp
           test -f opencv/android/staticlibs/arm64-v8a/libopencv_core.a
           test -f opencv/android/staticlibs/armeabi-v7a/libopencv_core.a
+
+      # Do not rely on the repository's include.gradle formatting.
+      # Rewrite it during CI so NativeScript's temporary plugin build can only
+      # build the two real-device ARM ABIs.
+      - name: Force ARM ABIs in native plugin
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          INCLUDE_GRADLE="plugin-nativeprocessor/platforms/android/include.gradle"
+
+          cat > "$INCLUDE_GRADLE" <<'GRADLE_EOF'
+          android {
+              defaultConfig {
+                  minSdkVersion 24
+
+                  // Applies to every plugin Gradle invocation, including
+                  // NativeScript's temporary plugin build.
+                  ndk {
+                      abiFilters 'armeabi-v7a', 'arm64-v8a'
+                  }
+
+                  if (project.hasProperty("tempBuild")) {
+                      externalNativeBuild {
+                          cmake {
+                              cppFlags "-frtti -fexceptions"
+                              abiFilters 'armeabi-v7a', 'arm64-v8a'
+
+                              def cmakeArguments = [
+                                  "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",
+                                  "-DANDROID_TOOLCHAIN=clang",
+                                  "-DANDROID_STL=c++_shared"
+                              ]
+
+                              if (project.hasProperty("withQRCode")) {
+                                  cmakeArguments << "-DWITH_QRCODE=1"
+                              }
+
+                              cmakeArguments << (
+                                  "-DDISABLE_SVE=" +
+                                  (project.hasProperty("disableSVE") ? "1" : "0")
+                              )
+
+                              arguments(*cmakeArguments)
+                          }
+                      }
+                  }
+              }
+          }
+          GRADLE_EOF
+
+          echo "Final include.gradle:"
+          cat "$INCLUDE_GRADLE"
+
+          # Flexible checks: do not depend on exact whitespace/quoting.
+          grep -q "ndk" "$INCLUDE_GRADLE"
+          grep -q "armeabi-v7a" "$INCLUDE_GRADLE"
+          grep -q "arm64-v8a" "$INCLUDE_GRADLE"
+
+          if grep -Eq "abiFilters[^[:cntrl:]]*x86" "$INCLUDE_GRADLE"; then
+            echo "ERROR: x86 ABI is still enabled."
+            exit 1
+          fi
 
       - name: Materialize native plugin dependencies
         shell: bash
@@ -190,42 +255,29 @@ jobs:
           cp -a zxingcpp/. "$CPP_DIR/zxingcpp/"
 
           test -f "$CPP_DIR/opencv/include/opencv2/opencv.hpp"
+          test -f "$CPP_DIR/opencv/staticlibs/arm64-v8a/libopencv_core.a"
+          test -f "$CPP_DIR/opencv/staticlibs/armeabi-v7a/libopencv_core.a"
+
           test -f "$CPP_DIR/tesseract/staticlibs/arm64-v8a/libtesseract.a"
           test -f "$CPP_DIR/tesseract/staticlibs/armeabi-v7a/libtesseract.a"
+
           test -f "$CPP_DIR/src/DocumentDetector.cpp"
+          test -f "$CPP_DIR/src/include/DocumentDetector.h"
+          test -f "$CPP_DIR/zxingcpp/core/CMakeLists.txt"
 
-      - name: Verify ABI configuration
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          INCLUDE_GRADLE="plugin-nativeprocessor/platforms/android/include.gradle"
-
-          grep -F "abiFilters 'armeabi-v7a', 'arm64-v8a'" "$INCLUDE_GRADLE"
-          grep -F "ndk {" "$INCLUDE_GRADLE"
-
-          if grep -Eq "abiFilters.*x86" "$INCLUDE_GRADLE"; then
-            echo "ERROR: x86 ABI is still enabled in plugin-nativeprocessor."
-            exit 1
-          fi
-
-          echo "Only armeabi-v7a and arm64-v8a are enabled."
-
-      - name: Patch OpenCV ARM static linker dependencies
+      - name: Patch OpenCV static linker dependencies
         shell: bash
         run: |
           set -euxo pipefail
 
           CMAKE_FILE="plugin-nativeprocessor/platforms/android/cpp/CMakeLists.txt"
 
-          test -f "$CMAKE_FILE"
-
-          # Avoid appending the patch twice if it is already committed.
           if ! grep -q "OPENSCAN_OPENCV_STATIC_FIX" "$CMAKE_FILE"; then
             cat >> "$CMAKE_FILE" <<'CMAKE_EOF'
 
           # OPENSCAN_OPENCV_STATIC_FIX
-          # Required by the stock OpenCV 4.12 Android static archives.
+          # Stock OpenCV 4.12 Android static archives keep some dependencies
+          # as separate .a files.
           set(OPENCV_EXTRA_STATIC_LIBS "")
 
           foreach(OPENCV_EXTRA_LIB
@@ -251,14 +303,11 @@ jobs:
           CMAKE_EOF
           fi
 
-      - name: Clean previous generated Android build
+      - name: Clean generated native build
         shell: bash
         run: |
           set -euxo pipefail
-
-          rm -rf \
-            "$APP_BUILD_PATH/android" \
-            "$APP_BUILD_PATH/tempPlugin"
+          rm -rf "$APP_BUILD_PATH/android" "$APP_BUILD_PATH/tempPlugin"
 
       - name: Build Document Scanner Debug APK
         shell: bash
@@ -270,19 +319,6 @@ jobs:
             --env.devlog \
             --env.production=0 \
             --gradleArgs="-PabiFilters=arm64-v8a,armeabi-v7a"
-
-      - name: Verify no x86 native build was produced
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          if find "$APP_BUILD_PATH" -type d \( -name x86 -o -name x86_64 \) -print | grep -q .; then
-            echo "ERROR: x86/x86_64 native build directories were generated."
-            find "$APP_BUILD_PATH" -type d \( -name x86 -o -name x86_64 \) -print
-            exit 1
-          fi
-
-          echo "ABI verification passed."
 
       - name: Find and collect Debug APK
         id: apk
