@@ -39,17 +39,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: false
-          dotnet: true
-          haskell: true
-          large-packages: false
-          docker-images: true
-          swap-storage: true
-
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
@@ -70,9 +59,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-
           yes | sdkmanager --licenses >/dev/null || true
-
           sdkmanager \
             "cmdline-tools;latest" \
             "platform-tools" \
@@ -81,60 +68,6 @@ jobs:
             "build-tools;36.0.0" \
             "ndk;27.3.13750724" \
             "cmake;3.22.1"
-
-          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
-
-          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
-          echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
-          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-
-      - name: Create NativeScript Android SDK compatibility bridge
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          mkdir -p "$ANDROID_HOME/tools/bin"
-
-          ln -sfn \
-            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-            "$ANDROID_HOME/tools/bin/sdkmanager"
-
-          ln -sfn \
-            "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
-            "$ANDROID_HOME/tools/bin/avdmanager"
-
-          if [ -x "$ANDROID_HOME/emulator/emulator" ]; then
-            ln -sfn \
-              "$ANDROID_HOME/emulator/emulator" \
-              "$ANDROID_HOME/tools/emulator"
-          fi
-
-          if [ -x "$ANDROID_HOME/emulator/mksdcard" ]; then
-            ln -sfn \
-              "$ANDROID_HOME/emulator/mksdcard" \
-              "$ANDROID_HOME/tools/mksdcard"
-          fi
-
-          echo "$ANDROID_HOME/tools" >> "$GITHUB_PATH"
-          echo "$ANDROID_HOME/tools/bin" >> "$GITHUB_PATH"
-
-      - name: Restore required source submodules
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          rm -rf tools zxingcpp
-
-          git clone --filter=blob:none https://github.com/Akylas/app-tools.git tools
-          git -C tools checkout 01fb954
-          git -C tools submodule update --init --recursive
-
-          git clone --filter=blob:none https://github.com/Akylas/zxing-cpp.git zxingcpp
-          git -C zxingcpp checkout cbf6afd
-          git -C zxingcpp submodule update --init --recursive
-
-          test -f tools/package.json
-          test -f zxingcpp/CMakeLists.txt
 
       - name: Enable Corepack and Yarn
         shell: bash
@@ -152,12 +85,6 @@ jobs:
           ns error-reporting disable
           ns --version
 
-      - name: Check NativeScript Android environment
-        shell: bash
-        run: |
-          set -euxo pipefail
-          ns doctor android
-
       - name: Install project dependencies
         shell: bash
         run: |
@@ -167,25 +94,14 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-
           rm -f android.zip
           chmod +x scripts/ci.prepare.sh
-          bash scripts/ci.prepare.sh \
-            --platform android \
-            --flavor documentscanner
+          bash scripts/ci.prepare.sh --platform android --flavor documentscanner
 
-      # The project requires OpenCV headers and static libraries under:
-      #   opencv/android/include
-      #   opencv/android/staticlibs/<ABI>
-      #   opencv/android/3rdparty/libs/<ABI>
-      #
-      # The source repository does not store these large Android binaries.
-      # Install the exact OpenCV version documented by OSS-DocumentScanner.
       - name: Install OpenCV 4.12.0 Android SDK
         shell: bash
         run: |
           set -euxo pipefail
-
           WORK_DIR="$RUNNER_TEMP/opencv-sdk"
           ZIP_PATH="$RUNNER_TEMP/opencv-${OPENCV_VERSION}-android-sdk.zip"
 
@@ -202,7 +118,6 @@ jobs:
           unzip -q "$ZIP_PATH" -d "$WORK_DIR"
 
           SDK_ROOT="$(find "$WORK_DIR" -maxdepth 2 -type d -name 'OpenCV-android-sdk' | head -n 1)"
-
           if [ -z "$SDK_ROOT" ]; then
             echo "ERROR: OpenCV-android-sdk directory was not found after extraction."
             find "$WORK_DIR" -maxdepth 3 -type d -print
@@ -212,62 +127,10 @@ jobs:
           rm -rf opencv/android
           mkdir -p opencv/android/include
 
-          cp -a \
-            "$SDK_ROOT/sdk/native/jni/include/." \
-            opencv/android/include/
+          cp -a "$SDK_ROOT/sdk/native/jni/include/." opencv/android/include/
+          cp -a "$SDK_ROOT/sdk/native/staticlibs" opencv/android/staticlibs
+          cp -a "$SDK_ROOT/sdk/native/3rdparty" opencv/android/3rdparty
 
-          cp -a \
-            "$SDK_ROOT/sdk/native/staticlibs" \
-            opencv/android/staticlibs
-
-          cp -a \
-            "$SDK_ROOT/sdk/native/3rdparty" \
-            opencv/android/3rdparty
-
-          echo "OpenCV Android SDK installed:"
-          find opencv/android -maxdepth 3 -type f | head -n 80
-
-      - name: Verify native C++ dependencies
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          # OpenCV headers
-          test -f opencv/android/include/opencv2/opencv.hpp
-
-          # OpenCV static libs used by CMake
-          test -f opencv/android/staticlibs/arm64-v8a/libopencv_core.a
-          test -f opencv/android/staticlibs/arm64-v8a/libopencv_imgproc.a
-          test -f opencv/android/staticlibs/arm64-v8a/libopencv_photo.a
-
-          test -f opencv/android/staticlibs/armeabi-v7a/libopencv_core.a
-          test -f opencv/android/staticlibs/armeabi-v7a/libopencv_imgproc.a
-          test -f opencv/android/staticlibs/armeabi-v7a/libopencv_photo.a
-
-          # Tesseract resources from the project's dev_resources package
-          test -d tesseract/android
-          test -d tesseract/android/include
-          test -d tesseract/android/staticlibs
-
-          test -f tesseract/android/staticlibs/arm64-v8a/libtesseract.a
-          test -f tesseract/android/staticlibs/armeabi-v7a/libtesseract.a
-
-          # Source dependencies
-          test -f tools/package.json
-          test -f zxingcpp/CMakeLists.txt
-
-          echo "All required native dependencies are present."
-
-      # NativeScript copies plugin-nativeprocessor to build/.../tempPlugin before
-      # compiling it. The repository uses relative symlinks inside cpp/:
-      #   opencv   -> ../../../../opencv/android
-      #   tesseract-> ../../../../tesseract/android
-      #   src      -> ../../../../cpp/src
-      #   zxingcpp -> ../../../../zxingcpp
-      #
-      # Those relative links become invalid after the plugin is copied into
-      # tempPlugin. Replace them with real directories before NativeScript
-      # performs the copy so all C++ headers/sources/static libraries survive.
       - name: Materialize native plugin dependencies
         shell: bash
         run: |
@@ -275,162 +138,25 @@ jobs:
 
           CPP_DIR="plugin-nativeprocessor/platforms/android/cpp"
 
-          # Remove repository symlinks/placeholders.
           rm -rf \
             "$CPP_DIR/opencv" \
             "$CPP_DIR/tesseract" \
             "$CPP_DIR/src" \
             "$CPP_DIR/zxingcpp"
 
-          mkdir -p \
-            "$CPP_DIR/opencv" \
-            "$CPP_DIR/tesseract" \
-            "$CPP_DIR/src" \
-            "$CPP_DIR/zxingcpp"
+          mkdir -p "$CPP_DIR/opencv" "$CPP_DIR/tesseract" "$CPP_DIR/src" "$CPP_DIR/zxingcpp"
 
-          # Copy the actual contents instead of symlinks.
           cp -a opencv/android/. "$CPP_DIR/opencv/"
           cp -a tesseract/android/. "$CPP_DIR/tesseract/"
           cp -a cpp/src/. "$CPP_DIR/src/"
           cp -a zxingcpp/. "$CPP_DIR/zxingcpp/"
 
-          # Verify exactly what CMake will see inside the plugin.
-          test -f "$CPP_DIR/opencv/include/opencv2/opencv.hpp"
-          test -f "$CPP_DIR/opencv/staticlibs/arm64-v8a/libopencv_core.a"
-          test -f "$CPP_DIR/opencv/staticlibs/armeabi-v7a/libopencv_core.a"
-
-          test -d "$CPP_DIR/tesseract/include"
-          test -f "$CPP_DIR/tesseract/staticlibs/arm64-v8a/libtesseract.a"
-          test -f "$CPP_DIR/tesseract/staticlibs/armeabi-v7a/libtesseract.a"
-
-          test -f "$CPP_DIR/src/DocumentDetector.cpp"
-          test -f "$CPP_DIR/src/include/DocumentDetector.h"
-          test -f "$CPP_DIR/zxingcpp/core/CMakeLists.txt"
-
-          echo "Native plugin dependencies materialized successfully."
-          du -sh \
-            "$CPP_DIR/opencv" \
-            "$CPP_DIR/tesseract" \
-            "$CPP_DIR/src" \
-            "$CPP_DIR/zxingcpp"
-
-      # The official OpenCV Android static SDK keeps several dependencies
-      # as separate archives. libopencv_core.a references Intel ITT tracing
-      # and Carotene/Tegra HAL symbols, so those archives must be linked too.
-      # The original project CMake only lists OpenCV core/imgproc/photo and
-      # KleidiCV, which is not sufficient for the stock OpenCV 4.12.0 SDK.
-      - name: Patch OpenCV static linker dependencies
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          CMAKE_FILE="plugin-nativeprocessor/platforms/android/cpp/CMakeLists.txt"
-
-          test -f "$CMAKE_FILE"
-
-          cat >> "$CMAKE_FILE" <<'CMAKE_EOF'
-
-          # ---- GitHub CI compatibility: OpenCV 4.12.0 static dependencies ----
-          # OpenCV's Android static package ships some dependencies separately.
-          # Add them only when they exist for the current ABI.
-          set(OPENCV_EXTRA_STATIC_LIBS "")
-
-          foreach(OPENCV_EXTRA_LIB
-                  ittnotify
-                  cpufeatures
-                  tegra_hal
-                  tbb)
-              set(OPENCV_EXTRA_LIB_PATH
-                  "${CMAKE_CURRENT_SOURCE_DIR}/opencv/3rdparty/libs/${ANDROID_ABI}/lib${OPENCV_EXTRA_LIB}.a")
-
-              if(EXISTS "${OPENCV_EXTRA_LIB_PATH}")
-                  message(STATUS "Linking OpenCV dependency: ${OPENCV_EXTRA_LIB_PATH}")
-                  list(APPEND OPENCV_EXTRA_STATIC_LIBS "${OPENCV_EXTRA_LIB_PATH}")
-              endif()
-          endforeach()
-
-          # Keep the dependency archives after libopencv_core.a in the final
-          # link command. dl/m/atomic satisfy Android-side low-level symbols.
-          target_link_libraries(${TARGET}
-              ${OPENCV_EXTRA_STATIC_LIBS}
-              dl
-              atomic
-              m
-          )
-          # ---- End GitHub CI compatibility patch ----
-          CMAKE_EOF
-
-          echo "Available OpenCV third-party libraries (arm64-v8a):"
-          find \
-            "plugin-nativeprocessor/platforms/android/cpp/opencv/3rdparty/libs/arm64-v8a" \
-            -maxdepth 1 -type f -name '*.a' -printf '%f\n' \
-            | sort || true
-
-          echo "Available OpenCV third-party libraries (armeabi-v7a):"
-          find \
-            "plugin-nativeprocessor/platforms/android/cpp/opencv/3rdparty/libs/armeabi-v7a" \
-            -maxdepth 1 -type f -name '*.a' -printf '%f\n' \
-            | sort || true
-
-          echo "Patched CMake tail:"
-          tail -n 55 "$CMAKE_FILE"
-
       - name: Build Document Scanner Debug APK
         shell: bash
         run: |
           set -euxo pipefail
-
           ns build android \
             --no-hmr \
             --env.devlog \
             --env.production=0 \
             --gradleArgs=-PabiFilters=arm64-v8a,armeabi-v7a
-
-      - name: Find and collect Debug APK
-        id: apk
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "Searching for generated APK..."
-
-          APK_PATH="$(find "${APP_BUILD_PATH}" -type f -name '*.apk' \
-            ! -name '*release*' \
-            ! -name '*unsigned*' \
-            | head -n 1)"
-
-          if [ -z "$APK_PATH" ]; then
-            echo "ERROR: Debug APK was not found."
-            echo "All APK files:"
-            find . -type f -name '*.apk' -print || true
-            exit 1
-          fi
-
-          mkdir -p dist
-          cp "$APK_PATH" dist/OSS-DocumentScanner-debug.apk
-
-          echo "apk_path=dist/OSS-DocumentScanner-debug.apk" >> "$GITHUB_OUTPUT"
-          echo "Found APK: $APK_PATH"
-          ls -lh dist/OSS-DocumentScanner-debug.apk
-
-      - name: Upload Debug APK as Actions artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: OSS-DocumentScanner-debug
-          path: ${{ steps.apk.outputs.apk_path }}
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Replace debug-latest GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          gh release delete debug-latest --cleanup-tag --yes 2>/dev/null || true
-
-          gh release create debug-latest \
-            "${{ steps.apk.outputs.apk_path }}#OSS-DocumentScanner-debug.apk" \
-            --target "${{ github.sha }}" \
-            --title "OSS Document Scanner - Latest Debug APK" \
-            --notes "Automatic debug build from commit ${{ github.sha }}. Debug APK only; no release APK or AAB is generated." \
-            --prerelease
