@@ -68,24 +68,71 @@ jobs:
       - name: Install Android SDK packages
         shell: bash
         run: |
+          set -euxo pipefail
+
           yes | sdkmanager --licenses >/dev/null || true
+
           sdkmanager \
+            "cmdline-tools;latest" \
             "platform-tools" \
+            "emulator" \
             "platforms;android-36" \
             "build-tools;36.0.0" \
             "ndk;27.3.13750724" \
             "cmake;3.22.1"
 
-          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+
           sdkmanager --list_installed
 
-      # GitHub source ZIPs do not contain Git submodule contents.
-      # The original OSS-DocumentScanner repository currently pins:
-      #   tools     -> Akylas/app-tools @ 01fb954
-      #   zxingcpp  -> Akylas/zxing-cpp @ cbf6afd
-      #
-      # Restore those exact revisions so "file:tools" and native ZXing
-      # dependencies exist before Yarn starts.
+      # Akylas/NativeScript environment detection still expects the old
+      # $ANDROID_HOME/tools SDK layout. Modern Android SDKs use
+      # cmdline-tools/latest and emulator/. Build a compatibility bridge.
+      - name: Create NativeScript Android SDK compatibility bridge
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p "$ANDROID_HOME/tools/bin"
+
+          ln -sfn \
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "$ANDROID_HOME/tools/bin/sdkmanager"
+
+          ln -sfn \
+            "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
+            "$ANDROID_HOME/tools/bin/avdmanager"
+
+          if [ -x "$ANDROID_HOME/emulator/emulator" ]; then
+            ln -sfn \
+              "$ANDROID_HOME/emulator/emulator" \
+              "$ANDROID_HOME/tools/emulator"
+          fi
+
+          if [ -x "$ANDROID_HOME/emulator/mksdcard" ]; then
+            ln -sfn \
+              "$ANDROID_HOME/emulator/mksdcard" \
+              "$ANDROID_HOME/tools/mksdcard"
+          fi
+
+          echo "$ANDROID_HOME/tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/tools/bin" >> "$GITHUB_PATH"
+
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME"
+
+          ls -la "$ANDROID_HOME/tools"
+          ls -la "$ANDROID_HOME/tools/bin"
+
+          command -v adb
+          command -v sdkmanager
+          command -v avdmanager
+          command -v emulator
+
       - name: Restore required source submodules
         shell: bash
         run: |
@@ -126,6 +173,12 @@ jobs:
           ns error-reporting disable
           ns --version
 
+      - name: Check NativeScript Android environment
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ns doctor android
+
       - name: Install project dependencies
         shell: bash
         run: |
@@ -165,6 +218,8 @@ jobs:
       - name: Build Document Scanner Debug APK
         shell: bash
         run: |
+          set -euxo pipefail
+
           ns build android \
             --no-hmr \
             --env.devlog \
@@ -175,6 +230,8 @@ jobs:
         id: apk
         shell: bash
         run: |
+          set -euxo pipefail
+
           echo "Searching for generated APK..."
 
           APK_PATH="$(find "${APP_BUILD_PATH}" -type f -name '*.apk' \
