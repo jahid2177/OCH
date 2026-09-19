@@ -167,65 +167,53 @@ jobs:
           test -f opencv/android/staticlibs/arm64-v8a/libopencv_core.a
           test -f opencv/android/staticlibs/armeabi-v7a/libopencv_core.a
 
-      # Do not rely on the repository's include.gradle formatting.
-      # Rewrite it during CI so NativeScript's temporary plugin build can only
-      # build the two real-device ARM ABIs.
-      - name: Force ARM ABIs in native plugin
+      - name: Verify and patch native plugin Gradle config
         shell: bash
         run: |
           set -euxo pipefail
 
           INCLUDE_GRADLE="plugin-nativeprocessor/platforms/android/include.gradle"
 
-          cat > "$INCLUDE_GRADLE" <<'GRADLE_EOF'
-          android {
-              defaultConfig {
-                  minSdkVersion 24
+          test -f "$INCLUDE_GRADLE"
 
-                  // Applies to every plugin Gradle invocation, including
-                  // NativeScript's temporary plugin build.
-                  ndk {
-                      abiFilters 'armeabi-v7a', 'arm64-v8a'
-                  }
+          # The full original file must remain intact because it also provides
+          # Kotlin, AndroidX DocumentFile and iText PDF dependencies.
+          grep -q 'org.jetbrains.kotlin.android' "$INCLUDE_GRADLE"
+          grep -q 'androidx.documentfile:documentfile' "$INCLUDE_GRADLE"
+          grep -q 'com.itextpdf.android:kernel-android' "$INCLUDE_GRADLE"
+          grep -q 'com.itextpdf.android:layout-android' "$INCLUDE_GRADLE"
 
-                  if (project.hasProperty("tempBuild")) {
-                      externalNativeBuild {
-                          cmake {
-                              cppFlags "-frtti -fexceptions"
-                              abiFilters 'armeabi-v7a', 'arm64-v8a'
+          # Only change the ABI list. Never overwrite the whole Gradle file.
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
 
-                              def cmakeArguments = [
-                                  "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",
-                                  "-DANDROID_TOOLCHAIN=clang",
-                                  "-DANDROID_STL=c++_shared"
-                              ]
+          path = Path("plugin-nativeprocessor/platforms/android/include.gradle")
+          text = path.read_text(encoding="utf-8")
 
-                              if (project.hasProperty("withQRCode")) {
-                                  cmakeArguments << "-DWITH_QRCODE=1"
-                              }
+          pattern = r"(?m)^(\s*)abiFilters\s+[^\n]+$"
+          matches = re.findall(pattern, text)
 
-                              cmakeArguments << (
-                                  "-DDISABLE_SVE=" +
-                                  (project.hasProperty("disableSVE") ? "1" : "0")
-                              )
+          if not matches:
+              raise SystemExit("ERROR: No abiFilters line found in include.gradle")
 
-                              arguments(*cmakeArguments)
-                          }
-                      }
-                  }
-              }
-          }
-          GRADLE_EOF
+          text, count = re.subn(
+              pattern,
+              lambda m: f"{m.group(1)}abiFilters 'armeabi-v7a', 'arm64-v8a'",
+              text,
+              count=1,
+          )
 
-          echo "Final include.gradle:"
-          cat "$INCLUDE_GRADLE"
+          path.write_text(text, encoding="utf-8")
+          print(f"Patched {count} abiFilters line(s)")
+          PY
 
-          # Flexible checks: do not depend on exact whitespace/quoting.
-          grep -q "ndk" "$INCLUDE_GRADLE"
-          grep -q "armeabi-v7a" "$INCLUDE_GRADLE"
-          grep -q "arm64-v8a" "$INCLUDE_GRADLE"
+          echo "Relevant include.gradle lines:"
+          grep -nE \
+            'apply plugin|abiFilters|documentfile|itextpdf|jvmToolchain' \
+            "$INCLUDE_GRADLE"
 
-          if grep -Eq "abiFilters[^[:cntrl:]]*x86" "$INCLUDE_GRADLE"; then
+          if grep -E 'abiFilters.*(x86|x86_64)' "$INCLUDE_GRADLE"; then
             echo "ERROR: x86 ABI is still enabled."
             exit 1
           fi
