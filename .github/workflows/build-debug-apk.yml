@@ -37,7 +37,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: recursive
 
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
@@ -61,9 +60,6 @@ jobs:
         with:
           node-version: '20'
 
-      # IMPORTANT:
-      # setup-android@v3 tried to install the deprecated Android SDK "tools"
-      # package, which Google no longer serves. v4 uses valid packages.
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
@@ -83,11 +79,41 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_HOME"
           sdkmanager --list_installed
 
+      # GitHub source ZIPs do not contain Git submodule contents.
+      # The original OSS-DocumentScanner repository currently pins:
+      #   tools     -> Akylas/app-tools @ 01fb954
+      #   zxingcpp  -> Akylas/zxing-cpp @ cbf6afd
+      #
+      # Restore those exact revisions so "file:tools" and native ZXing
+      # dependencies exist before Yarn starts.
+      - name: Restore required source submodules
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf tools zxingcpp
+
+          git clone --filter=blob:none https://github.com/Akylas/app-tools.git tools
+          git -C tools checkout 01fb954
+          git -C tools submodule update --init --recursive
+
+          git clone --filter=blob:none https://github.com/Akylas/zxing-cpp.git zxingcpp
+          git -C zxingcpp checkout cbf6afd
+          git -C zxingcpp submodule update --init --recursive
+
+          test -f tools/package.json
+          test -f zxingcpp/CMakeLists.txt
+
+          echo "Restored tools revision:"
+          git -C tools rev-parse --short HEAD
+
+          echo "Restored zxingcpp revision:"
+          git -C zxingcpp rev-parse --short HEAD
+
       - name: Enable Corepack and Yarn
         shell: bash
         run: |
           corepack enable
-          yarn config get globalFolder
           yarn --version
 
       - name: Install NativeScript CLI
@@ -124,7 +150,17 @@ jobs:
             exit 1
           }
 
-          echo "OpenCV and Tesseract resources are ready."
+          test -d tools || {
+            echo "ERROR: tools is missing"
+            exit 1
+          }
+
+          test -d zxingcpp || {
+            echo "ERROR: zxingcpp is missing"
+            exit 1
+          }
+
+          echo "Required native resources are ready."
 
       - name: Build Document Scanner Debug APK
         shell: bash
